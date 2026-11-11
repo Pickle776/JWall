@@ -1,0 +1,13 @@
+bin/
+obj/
+dist/
+wallpapers/
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+*.exe
+*.pdb
+*.WebView2/
+config.json
