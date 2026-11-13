@@ -12,7 +12,7 @@ A lightweight live wallpaper engine for Windows 10 and 11 using native Windows d
 ## Quick Start
 
 1. Download [`JWall.exe`](https://github.com/Pickle776/JWall/releases/latest/download/JWall.exe) from the [Releases](https://github.com/Pickle776/JWall/releases) tab and place it in any empty folder you want.
-2. Run `JWall.exe`. If Windows asks you to install the .NET Desktop Runtime, click **Yes** to let Microsoft install it.
+2. Run `JWall.exe`. If Windows asks you to install the .NET Desktop Runtime (8.0 or later), click **Yes** to let Microsoft install it.
 3. The app will launch in your system tray and automatically create a `wallpapers` folder with two preloaded examples ready to use.
 
 ## Adding Your Own Wallpapers
@@ -36,7 +36,7 @@ Every subfolder inside `wallpapers` becomes an option in your tray menu.
 
 ## Building from Source
 
-Requires the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
+Requires the [.NET 8 SDK](https://dotnet.microsoft.com/download) (or later).
 
 ```powershell
 cd src
