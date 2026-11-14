@@ -7,6 +7,7 @@ A lightweight live wallpaper engine for Windows 10 and 11 using native Windows d
 - 1.2 MB download
 - Near-zero CPU usage (automatically freezes animations when other apps are focused)
 - Full desktop mouse interaction
+- Multi-monitor support (Extend, Mirror, and Stretch modes)
 - Runs websites, live streams, and local HTML5/WebGL projects
 
 ## Quick Start

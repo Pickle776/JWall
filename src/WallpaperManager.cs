@@ -25,6 +25,7 @@ namespace JWall
     public class AppSettings
     {
         public string LastWallpaper { get; set; } = "Live Earth";
+        public string MultiMonitorMode { get; set; } = "Extend";
         public bool MouseInteraction { get; set; } = true;
         public bool AutoPauseOnUnfocus { get; set; } = true;
         public bool FastStartup { get; set; } = true;
