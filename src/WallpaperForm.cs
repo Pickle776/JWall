@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -64,7 +63,7 @@ namespace JWall
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Bounds = GetVirtualScreenBounds();
+            Bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
             BackColor = Color.Black;
 
             // Register custom window messages and restart event
@@ -186,79 +185,12 @@ namespace JWall
             };
         }
 
-        private static Rectangle GetVirtualScreenBounds()
-        {
-            Rectangle vs = SystemInformation.VirtualScreen;
-            if (vs.Width > 0 && vs.Height > 0)
-            {
-                return vs;
-            }
-            return Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
-        }
-
-        private string GetDisplayConfigJson()
-        {
-            Rectangle vs = GetVirtualScreenBounds();
-            Screen[] allScreens = Screen.AllScreens;
-            Rectangle primary = Screen.PrimaryScreen?.Bounds ?? vs;
-
-            var screensList = new List<object>(allScreens.Length);
-            foreach (var s in allScreens)
-            {
-                Rectangle b = s.Bounds;
-                screensList.Add(new
-                {
-                    primary = s.Primary,
-                    nx = Math.Round((b.X - vs.X) / (double)vs.Width, 6),
-                    ny = Math.Round((b.Y - vs.Y) / (double)vs.Height, 6),
-                    nw = Math.Round(b.Width / (double)vs.Width, 6),
-                    nh = Math.Round(b.Height / (double)vs.Height, 6)
-                });
-            }
-
-            string mode = _manager.Settings.MultiMonitorMode;
-            if (string.IsNullOrEmpty(mode) ||
-                (!mode.Equals("Extend", StringComparison.OrdinalIgnoreCase) &&
-                 !mode.Equals("Mirror", StringComparison.OrdinalIgnoreCase) &&
-                 !mode.Equals("Stretch", StringComparison.OrdinalIgnoreCase)))
-            {
-                mode = "Extend";
-            }
-
-            var payload = new
-            {
-                mode,
-                multiMonitor = allScreens.Length > 1,
-                primary = new
-                {
-                    nx = Math.Round((primary.X - vs.X) / (double)vs.Width, 6),
-                    ny = Math.Round((primary.Y - vs.Y) / (double)vs.Height, 6),
-                    nw = Math.Round(primary.Width / (double)vs.Width, 6),
-                    nh = Math.Round(primary.Height / (double)vs.Height, 6)
-                },
-                screens = screensList
-            };
-
-            return JsonSerializer.Serialize(payload);
-        }
-
-        private void PushDisplayConfigToWebView()
-        {
-            if (_isDisposed || Disposing || _webView?.CoreWebView2 == null) return;
-            try
-            {
-                string json = GetDisplayConfigJson();
-                _webView.CoreWebView2.ExecuteScriptAsync($"if (window.__jwallUpdateDisplay) window.__jwallUpdateDisplay({json});");
-            }
-            catch { }
-        }
-
         private bool AttachToDesktopWorker()
         {
             if (_isDisposed || Disposing || !IsHandleCreated) return false;
             try
             {
-                Rectangle screenBounds = GetVirtualScreenBounds();
+                Rectangle screenBounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
                 IntPtr workerw;
                 bool ok = DesktopWorkerW.AttachToDesktop(Handle, screenBounds, out workerw);
                 if (ok)
@@ -389,343 +321,12 @@ namespace JWall
                     }
                 };
 
-                // Universal pause/resume RAF hook + generic W3C Fullscreen API + multi-monitor engine
-                string displayConfigJson = GetDisplayConfigJson();
-                string initScript = $"window.__jwallConfig = {displayConfigJson};\n" + @"
+                // Universal pause/resume RAF hook + generic W3C Fullscreen API support for child HWNDs
+                string initScript = @"
                 (function() {
                     window.__isPaused = false;
-                    window.__jwallHasWebGL = false;
-                    window.__jwallFrameDrawn = false;
                     const _rafQueue = [];
                     const _origRAF = window.requestAnimationFrame;
-
-                    const origInnerW = Object.getOwnPropertyDescriptor(window, 'innerWidth');
-                    const origInnerH = Object.getOwnPropertyDescriptor(window, 'innerHeight');
-
-                    function getRealWidth() {
-                        return origInnerW && origInnerW.get ? origInnerW.get.call(window) : window.innerWidth;
-                    }
-
-                    function getRealHeight() {
-                        return origInnerH && origInnerH.get ? origInnerH.get.call(window) : window.innerHeight;
-                    }
-
-                    if (origInnerW && origInnerW.get) {
-                        Object.defineProperty(window, 'innerWidth', {
-                            configurable: true,
-                            get: function() {
-                                const realW = origInnerW.get.call(this);
-                                const cfg = window.__jwallConfig;
-                                if (cfg && cfg.multiMonitor && cfg.mode === 'Mirror' && cfg.primary) {
-                                    return Math.max(1, Math.round(realW * cfg.primary.nw));
-                                }
-                                return realW;
-                            }
-                        });
-                    }
-
-                    if (origInnerH && origInnerH.get) {
-                        Object.defineProperty(window, 'innerHeight', {
-                            configurable: true,
-                            get: function() {
-                                const realH = origInnerH.get.call(this);
-                                const cfg = window.__jwallConfig;
-                                if (cfg && cfg.multiMonitor && cfg.mode === 'Mirror' && cfg.primary) {
-                                    return Math.max(1, Math.round(realH * cfg.primary.nh));
-                                }
-                                return realH;
-                            }
-                        });
-                    }
-
-                    let mirrorTargets = [];
-
-                    function findMirrorSource() {
-                        if (!document.body) return null;
-                        const videos = document.body.querySelectorAll('video');
-                        let best = null;
-                        let bestArea = 0;
-                        for (const v of videos) {
-                            if (v.readyState >= 2 && v.videoWidth > 0 && v.videoHeight > 0) {
-                                const r = v.getBoundingClientRect();
-                                const area = r.width * r.height;
-                                if (area > bestArea) {
-                                    best = v;
-                                    bestArea = area;
-                                }
-                            }
-                        }
-                        if (best) return best;
-
-                        const canvases = document.body.querySelectorAll('canvas');
-                        for (const c of canvases) {
-                            if (c.width > 0 && c.height > 0) {
-                                const area = c.width * c.height;
-                                if (area > bestArea) {
-                                    best = c;
-                                    bestArea = area;
-                                }
-                            }
-                        }
-                        return best;
-                    }
-
-                    function blitMirrors(force) {
-                        const cfg = window.__jwallConfig;
-                        if (!cfg || !cfg.multiMonitor || cfg.mode !== 'Mirror' || mirrorTargets.length === 0) return;
-
-                        const src = findMirrorSource();
-                        if (!src) return;
-
-                        if (src.tagName === 'CANVAS' && window.__jwallHasWebGL) {
-                            if (!window.__jwallFrameDrawn && !force) return;
-                            window.__jwallFrameDrawn = false;
-                        }
-
-                        const realW = getRealWidth();
-                        const realH = getRealHeight();
-                        const dpr = window.devicePixelRatio || 1;
-
-                        for (const item of mirrorTargets) {
-                            const targetW = Math.max(1, Math.round(realW * item.screen.nw * dpr));
-                            const targetH = Math.max(1, Math.round(realH * item.screen.nh * dpr));
-                            if (item.canvas.width !== targetW || item.canvas.height !== targetH) {
-                                item.canvas.width = targetW;
-                                item.canvas.height = targetH;
-                            }
-                            try {
-                                item.ctx.globalCompositeOperation = 'copy';
-                                item.ctx.drawImage(src, 0, 0, targetW, targetH);
-                            } catch (e) {}
-                        }
-                    }
-
-                    function ensureMmStyle() {
-                        if (!document.getElementById('__jw_mm_style')) {
-                            const s = document.createElement('style');
-                            s.id = '__jw_mm_style';
-                            s.textContent = `
-                                html.__jw_mirror, html.__jw_extend:not(.__jw_webgl) {
-                                    background: #000 !important;
-                                    overflow: hidden !important;
-                                    margin: 0 !important;
-                                    padding: 0 !important;
-                                }
-                                html.__jw_mirror body,
-                                html.__jw_extend:not(.__jw_webgl) body {
-                                    position: fixed !important;
-                                    left: var(--jw-px, 0%) !important;
-                                    top: var(--jw-py, 0%) !important;
-                                    width: var(--jw-pw, 100%) !important;
-                                    height: var(--jw-ph, 100%) !important;
-                                    margin: 0 !important;
-                                    overflow: hidden !important;
-                                }
-                                html.__jw_mirror .__lw_fullscreen_el,
-                                html.__jw_extend:not(.__jw_webgl) .__lw_fullscreen_el {
-                                    position: fixed !important;
-                                    left: var(--jw-px, 0%) !important;
-                                    top: var(--jw-py, 0%) !important;
-                                    right: auto !important;
-                                    bottom: auto !important;
-                                    width: var(--jw-pw, 100%) !important;
-                                    height: var(--jw-ph, 100%) !important;
-                                    max-width: var(--jw-pw, 100%) !important;
-                                    max-height: var(--jw-ph, 100%) !important;
-                                }
-                                html.__jw_extend.__jw_webgl #intro-overlay {
-                                    left: var(--jw-px, 0%) !important;
-                                    top: var(--jw-py, 0%) !important;
-                                    width: var(--jw-pw, 100%) !important;
-                                    height: var(--jw-ph, 100%) !important;
-                                }
-                                #__jw_mirror_root {
-                                    position: fixed;
-                                    inset: 0;
-                                    width: 100vw;
-                                    height: 100vh;
-                                    pointer-events: none;
-                                    z-index: 2147483646;
-                                }
-                            `;
-                            (document.head || document.documentElement).appendChild(s);
-                        }
-                    }
-
-                    function syncMirrorRoot(cfg) {
-                        const existing = document.getElementById('__jw_mirror_root');
-                        if (!cfg || !cfg.multiMonitor || cfg.mode !== 'Mirror') {
-                            if (existing) existing.remove();
-                            mirrorTargets = [];
-                            return;
-                        }
-                        if (!document.documentElement) return;
-
-                        const root = existing || document.createElement('div');
-                        if (!existing) {
-                            root.id = '__jw_mirror_root';
-                            document.documentElement.appendChild(root);
-                        }
-                        root.innerHTML = '';
-                        mirrorTargets = [];
-
-                        const realW = getRealWidth();
-                        const realH = getRealHeight();
-                        const dpr = window.devicePixelRatio || 1;
-                        const screens = Array.isArray(cfg.screens) ? cfg.screens : [];
-                        for (const sc of screens) {
-                            if (sc.primary) continue;
-                            const c = document.createElement('canvas');
-                            c.style.position = 'fixed';
-                            c.style.left = (sc.nx * 100) + '%';
-                            c.style.top = (sc.ny * 100) + '%';
-                            c.style.width = (sc.nw * 100) + '%';
-                            c.style.height = (sc.nh * 100) + '%';
-                            c.style.pointerEvents = 'none';
-                            c.width = Math.max(1, Math.round(realW * sc.nw * dpr));
-                            c.height = Math.max(1, Math.round(realH * sc.nh * dpr));
-                            root.appendChild(c);
-                            const ctx = c.getContext('2d', { alpha: false });
-                            if (ctx) {
-                                mirrorTargets.push({ screen: sc, canvas: c, ctx: ctx });
-                            }
-                        }
-                    }
-
-                    function applyDisplayConfig(cfg) {
-                        if (!cfg) return;
-                        window.__jwallConfig = cfg;
-                        const root = document.documentElement;
-                        if (!root) return;
-
-                        ensureMmStyle();
-                        if (window.__jwallHasWebGL) {
-                            root.classList.add('__jw_webgl');
-                        }
-
-                        if (cfg.primary) {
-                            root.style.setProperty('--jw-px', (cfg.primary.nx * 100) + '%');
-                            root.style.setProperty('--jw-py', (cfg.primary.ny * 100) + '%');
-                            root.style.setProperty('--jw-pw', (cfg.primary.nw * 100) + '%');
-                            root.style.setProperty('--jw-ph', (cfg.primary.nh * 100) + '%');
-                        }
-
-                        root.classList.remove('__jw_extend', '__jw_mirror', '__jw_stretch');
-                        if (cfg.multiMonitor) {
-                            if (cfg.mode === 'Mirror') root.classList.add('__jw_mirror');
-                            else if (cfg.mode === 'Stretch') root.classList.add('__jw_stretch');
-                            else root.classList.add('__jw_extend');
-                        }
-
-                        syncMirrorRoot(cfg);
-                    }
-
-                    window.__jwallUpdateDisplay = function(cfg) {
-                        applyDisplayConfig(cfg);
-                        window.dispatchEvent(new Event('resize'));
-                        _origRAF(function() {
-                            if (cfg && cfg.multiMonitor && cfg.mode === 'Mirror') {
-                                blitMirrors(true);
-                            }
-                        });
-                    };
-
-                    // WebGL frustum & Sun flare hooks for Extend + preserveDrawingBuffer for Mirror
-                    const projMatrixLocs = new WeakSet();
-                    const sunPosLocs = new WeakSet();
-                    const tempProjMatrix = new Float32Array(16);
-                    const tempSunPos = new Float32Array(2);
-
-                    const origGetContext = HTMLCanvasElement.prototype.getContext;
-                    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-                        const isWebGL = (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl');
-                        let finalAttrs = attrs;
-                        if (isWebGL && (!this.closest || !this.closest('#__jw_mirror_root'))) {
-                            finalAttrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
-                        }
-                        const ctx = origGetContext.call(this, type, finalAttrs);
-                        if (ctx && isWebGL && (!this.closest || !this.closest('#__jw_mirror_root'))) {
-                            window.__jwallHasWebGL = true;
-                            if (document.documentElement) {
-                                document.documentElement.classList.add('__jw_webgl');
-                            }
-                        }
-                        return ctx;
-                    };
-
-                    function patchWebGLProto(proto) {
-                        if (!proto || proto.__jwallPatched) return;
-                        proto.__jwallPatched = true;
-
-                        const origGetUniformLocation = proto.getUniformLocation;
-                        proto.getUniformLocation = function(program, name) {
-                            const loc = origGetUniformLocation.apply(this, arguments);
-                            if (loc) {
-                                if (name === 'projectionMatrix') projMatrixLocs.add(loc);
-                                else if (name === 'uSunPos') sunPosLocs.add(loc);
-                            }
-                            return loc;
-                        };
-
-                        const origUniformMatrix4fv = proto.uniformMatrix4fv;
-                        proto.uniformMatrix4fv = function(location, transpose, value) {
-                            const cfg = window.__jwallConfig;
-                            if (cfg && cfg.multiMonitor && cfg.mode === 'Extend' && cfg.primary && !transpose && value && value.length >= 16) {
-                                const isPerspective = Math.abs(value[11] + 1.0) < 1e-4 && value[15] === 0 && value[1] === 0 && value[4] === 0;
-                                if (projMatrixLocs.has(location) && isPerspective) {
-                                    tempProjMatrix.set(value.length === 16 ? value : value.subarray(0, 16));
-                                    const nh = cfg.primary.nh;
-                                    const offX = (cfg.primary.nx + cfg.primary.nw * 0.5) * 2.0 - 1.0;
-                                    const offY = 1.0 - (cfg.primary.ny + cfg.primary.nh * 0.5) * 2.0;
-                                    tempProjMatrix[0] *= nh;
-                                    tempProjMatrix[5] *= nh;
-                                    tempProjMatrix[8] -= offX;
-                                    tempProjMatrix[9] -= offY;
-                                    return origUniformMatrix4fv.call(this, location, transpose, tempProjMatrix);
-                                }
-                            }
-                            return origUniformMatrix4fv.apply(this, arguments);
-                        };
-
-                        const origUniform2f = proto.uniform2f;
-                        proto.uniform2f = function(location, x, y) {
-                            const cfg = window.__jwallConfig;
-                            if (cfg && cfg.multiMonitor && cfg.mode === 'Extend' && cfg.primary && sunPosLocs.has(location)) {
-                                const nh = cfg.primary.nh;
-                                const offX = (cfg.primary.nx + cfg.primary.nw * 0.5) * 2.0 - 1.0;
-                                const offY = 1.0 - (cfg.primary.ny + cfg.primary.nh * 0.5) * 2.0;
-                                return origUniform2f.call(this, location, x * nh + offX, y * nh + offY);
-                            }
-                            return origUniform2f.apply(this, arguments);
-                        };
-
-                        const origUniform2fv = proto.uniform2fv;
-                        proto.uniform2fv = function(location, value) {
-                            const cfg = window.__jwallConfig;
-                            if (cfg && cfg.multiMonitor && cfg.mode === 'Extend' && cfg.primary && sunPosLocs.has(location) && value && value.length >= 2) {
-                                const nh = cfg.primary.nh;
-                                const offX = (cfg.primary.nx + cfg.primary.nw * 0.5) * 2.0 - 1.0;
-                                const offY = 1.0 - (cfg.primary.ny + cfg.primary.nh * 0.5) * 2.0;
-                                tempSunPos[0] = value[0] * nh + offX;
-                                tempSunPos[1] = value[1] * nh + offY;
-                                return origUniform2fv.call(this, location, tempSunPos);
-                            }
-                            return origUniform2fv.apply(this, arguments);
-                        };
-
-                        for (const drawFn of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'drawRangeElements']) {
-                            if (typeof proto[drawFn] === 'function') {
-                                const origDraw = proto[drawFn];
-                                proto[drawFn] = function() {
-                                    window.__jwallFrameDrawn = true;
-                                    return origDraw.apply(this, arguments);
-                                };
-                            }
-                        }
-                    }
-
-                    if (typeof WebGLRenderingContext !== 'undefined') patchWebGLProto(WebGLRenderingContext.prototype);
-                    if (typeof WebGL2RenderingContext !== 'undefined') patchWebGLProto(WebGL2RenderingContext.prototype);
 
                     window.__pauseWallpaper = function() {
                         window.__isPaused = true;
@@ -736,7 +337,7 @@ namespace JWall
                             window.__isPaused = false;
                             const pending = _rafQueue.splice(0);
                             for (const cb of pending) {
-                                try { window.requestAnimationFrame(cb); } catch (e) {}
+                                try { _origRAF(cb); } catch (e) {}
                             }
                         }
                     };
@@ -746,31 +347,8 @@ namespace JWall
                             _rafQueue.push(callback);
                             return _rafQueue.length;
                         }
-                        return _origRAF(function(ts) {
-                            try {
-                                callback(ts);
-                            } finally {
-                                const cfg = window.__jwallConfig;
-                                if (cfg && cfg.multiMonitor && cfg.mode === 'Mirror') {
-                                    blitMirrors(false);
-                                }
-                            }
-                        });
+                        return _origRAF(callback);
                     };
-
-                    setInterval(function() {
-                        const cfg = window.__jwallConfig;
-                        if (!window.__isPaused && cfg && cfg.multiMonitor && cfg.mode === 'Mirror') {
-                            if (document.body && document.body.querySelector('video')) {
-                                blitMirrors(false);
-                            }
-                        }
-                    }, 33);
-
-                    applyDisplayConfig(window.__jwallConfig);
-                    window.addEventListener('DOMContentLoaded', function() {
-                        applyDisplayConfig(window.__jwallConfig);
-                    });
 
                     // Generic W3C Fullscreen API fallback when hosted as a WS_CHILD desktop window
                     let fsEl = null;
@@ -875,7 +453,6 @@ namespace JWall
                 _webView.CoreWebView2.NavigationCompleted += async (s, e) =>
                 {
                     Program.Log($"NavigationCompleted: Success={e.IsSuccess}, WebErrorStatus={e.WebErrorStatus}");
-                    PushDisplayConfigToWebView();
                     try
                     {
                         await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("Emulation.setFocusEmulationEnabled", @"{""enabled"":true}");
@@ -1079,34 +656,7 @@ namespace JWall
 
             _trayMenu.Items.Add(new ToolStripSeparator());
 
-            // 2. Multi-Monitor submenu (only visible when 2+ screens are detected)
-            if (Screen.AllScreens.Length > 1)
-            {
-                var multiMonitorMenu = new ToolStripMenuItem("Multi-Monitor");
-                string currentMode = _manager.Settings.MultiMonitorMode;
-                if (string.IsNullOrEmpty(currentMode)) currentMode = "Extend";
-
-                foreach (string modeOption in new[] { "Extend", "Mirror", "Stretch" })
-                {
-                    var modeItem = new ToolStripMenuItem(modeOption)
-                    {
-                        Checked = currentMode.Equals(modeOption, StringComparison.OrdinalIgnoreCase)
-                    };
-                    modeItem.Click += (s, e) =>
-                    {
-                        _manager.Settings.MultiMonitorMode = modeOption;
-                        _manager.SaveSettings();
-                        WakeOnDesktopActivity();
-                        PushDisplayConfigToWebView();
-                        UpdateTrayMenu();
-                    };
-                    multiMonitorMenu.DropDownItems.Add(modeItem);
-                }
-
-                _trayMenu.Items.Add(multiMonitorMenu);
-            }
-
-            // 3. Single Options submenu containing all settings
+            // 2. Single Options submenu containing all settings
             var optionsMenu = new ToolStripMenuItem("Options");
 
             // Mouse Interaction toggle
@@ -1200,28 +750,9 @@ namespace JWall
 
         private (string x, string y) ScreenToCssStrings(int screenX, int screenY)
         {
-            int targetX = screenX;
-            int targetY = screenY;
-            if (Screen.AllScreens.Length > 1 &&
-                string.Equals(_manager.Settings.MultiMonitorMode, "Mirror", StringComparison.OrdinalIgnoreCase))
-            {
-                Screen curScreen = Screen.FromPoint(new Point(screenX, screenY));
-                Screen? primary = Screen.PrimaryScreen;
-                if (primary != null && !curScreen.Primary && curScreen.Bounds.Width > 0 && curScreen.Bounds.Height > 0)
-                {
-                    double rx = (screenX - curScreen.Bounds.X) / (double)curScreen.Bounds.Width;
-                    double ry = (screenY - curScreen.Bounds.Y) / (double)curScreen.Bounds.Height;
-                    targetX = primary.Bounds.X + (int)Math.Round(rx * primary.Bounds.Width);
-                    targetY = primary.Bounds.Y + (int)Math.Round(ry * primary.Bounds.Height);
-                }
-            }
-
-            Point clientPt = IsHandleCreated
-                ? PointToClient(new Point(targetX, targetY))
-                : new Point(targetX - Left, targetY - Top);
             double scale = (DeviceDpi > 0 ? DeviceDpi : 96.0) / 96.0;
-            double cssX = clientPt.X / scale;
-            double cssY = clientPt.Y / scale;
+            double cssX = (screenX - Left) / scale;
+            double cssY = (screenY - Top) / scale;
             return (
                 Math.Round(cssX, 2).ToString(CultureInfo.InvariantCulture),
                 Math.Round(cssY, 2).ToString(CultureInfo.InvariantCulture)
@@ -1496,15 +1027,13 @@ namespace JWall
                 return;
             }
 
-            // Display resolution or monitor change -> resize to virtual screen and re-attach
+            // Display resolution or monitor change -> resize to primary screen and re-attach
             if (m.Msg == WM_DISPLAYCHANGE)
             {
                 Program.Log("WM_DISPLAYCHANGE received. Updating bounds and re-attaching...");
-                Bounds = GetVirtualScreenBounds();
+                Bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
                 _isAttached = AttachToDesktopWorker();
                 if (!_isAttached) _attachRetryTimer.Start();
-                PushDisplayConfigToWebView();
-                UpdateTrayMenu();
             }
 
             // System sleep / wake transitions

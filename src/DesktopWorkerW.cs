@@ -71,10 +71,6 @@ namespace JWall
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool ScreenToClient(IntPtr hWnd, ref Point lpPoint);
-
         public static IntPtr FindDesktopWorkerW()
         {
             IntPtr progman = FindWindowW("Progman", null);
@@ -170,17 +166,10 @@ namespace JWall
             IntPtr prevParent = SetParent(formHandle, workerw);
             Program.Log($"SetParent result: {prevParent}, LastError: {Marshal.GetLastWin32Error()}");
 
-            // Map virtual screen top-left into WorkerW client coordinates (handles negative monitor origins)
-            Point clientTopLeft = new Point(bounds.X, bounds.Y);
-            if (!ScreenToClient(workerw, ref clientTopLeft))
-            {
-                clientTopLeft = Point.Empty;
-            }
-
-            // Resize to cover virtual screen
-            bool posResult = SetWindowPos(formHandle, IntPtr.Zero, clientTopLeft.X, clientTopLeft.Y, bounds.Width, bounds.Height,
+            // Resize to cover screen
+            bool posResult = SetWindowPos(formHandle, IntPtr.Zero, bounds.X, bounds.Y, bounds.Width, bounds.Height,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            Program.Log($"SetWindowPos result: {posResult} at ({clientTopLeft.X},{clientTopLeft.Y} {bounds.Width}x{bounds.Height})");
+            Program.Log($"SetWindowPos result: {posResult}");
 
             attachedWorkerW = workerw;
             return true;
